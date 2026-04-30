@@ -442,3 +442,61 @@ void NVPTXAsmStreamer::emitDwarfLocDirectiveWithInlinedAt(
   emitDwarfLocDirectiveSuffix(FileNo, Line, Column, Flags, Isa, Discriminator,
                               FileName, Comment);
 }
+
+void NVPTXAsmStreamer::emitPTXDataType(NVPTXDataType Ty) {
+  OS << ".";
+  switch (Ty.Type) {
+  case NVPTXDataType::BasicType::Unsigned: {
+    OS << "u";
+    break;
+  }
+  case NVPTXDataType::BasicType::Signed: {
+    OS << "s";
+    break;
+  }
+  case NVPTXDataType::BasicType::FloatingPoint: {
+    OS << "f";
+    break;
+  }
+  case NVPTXDataType::BasicType::Bits: {
+    OS << "b";
+    break;
+  }
+  case NVPTXDataType::BasicType::Predicate: {
+    OS << "pred";
+    break;
+  }
+  default:
+    llvm_unreachable("Unexpected basic type in PTXDataType.");
+  }
+
+  if (!Ty.isPred())
+    OS << Ty.BitSize;
+}
+
+void NVPTXAsmStreamer::emitLocalVariable(NVPTXDataType Ty, StringRef Name,
+                                         unsigned Alignment,
+                                         unsigned ArrElems) {
+  OS << "\t.local ";
+  emitAlignment(Alignment);
+  OS << " ";
+  emitPTXDataType(Ty);
+  OS << " \t" << Name;
+  if (ArrElems)
+    OS << "[" << ArrElems << "]";
+  OS << ";";
+
+  EmitEOL();
+}
+
+void NVPTXAsmStreamer::emitRegisterVariable(NVPTXDataType Ty, StringRef Name,
+                                            unsigned Parameter) {
+  OS << "\t.reg ";
+  emitPTXDataType(Ty);
+  OS << " \t" << Name;
+  if (Parameter)
+    OS << "<" << Parameter << ">";
+  OS << ";";
+
+  EmitEOL();
+}

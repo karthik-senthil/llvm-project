@@ -13,6 +13,7 @@
 #ifndef LLVM_LIB_TARGET_NVPTX_MCTARGETDESC_NVPTXASMSTREAMER_H
 #define LLVM_LIB_TARGET_NVPTX_MCTARGETDESC_NVPTXASMSTREAMER_H
 
+#include "NVPTXDataType.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAsmStreamer.h"
@@ -61,6 +62,15 @@ class NVPTXAsmStreamer final : public MCAsmBaseStreamer {
                                    unsigned Column, unsigned Flags,
                                    unsigned Isa, unsigned Discriminator,
                                    StringRef FileName, StringRef Comment);
+
+  /// Helper to emit alignment directive.
+  void emitAlignment(unsigned Alignment) {
+    if (Alignment)
+      OS << ".align " << Alignment;
+  }
+
+  /// Helper to emit PTX data type.
+  void emitPTXDataType(NVPTXDataType Ty);
 
 public:
   NVPTXAsmStreamer(MCContext &Context,
@@ -159,6 +169,16 @@ public:
                                           unsigned Isa, unsigned Discriminator,
                                           StringRef FileName,
                                           StringRef Comment = {}) override;
+
+  /// Emits a local variable as -
+  /// .local .align Alignment .Ty    Name[ArrElems]
+  void emitLocalVariable(NVPTXDataType Ty, StringRef Name,
+                         unsigned Alignment = 0, unsigned ArrElems = 0);
+
+  /// Emits a register variable as -
+  /// .reg .<Ty>    Name<Parameter>
+  void emitRegisterVariable(NVPTXDataType Ty, StringRef Name,
+                            unsigned Parameter = 0);
 };
 } // namespace llvm
 

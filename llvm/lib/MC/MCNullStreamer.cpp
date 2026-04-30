@@ -27,6 +27,8 @@ public:
   /// @name MCStreamer Interface
   /// @{
 
+  bool isNull() const override { return true; }
+
   bool hasRawTextSupport() const override { return true; }
   void emitRawTextImpl(StringRef String) override {}
 

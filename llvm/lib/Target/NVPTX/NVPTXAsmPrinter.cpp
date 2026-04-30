@@ -12,11 +12,13 @@
 //===----------------------------------------------------------------------===//
 
 #include "NVPTXAsmPrinter.h"
+#include "MCTargetDesc/NVPTXAsmStreamer.h"
 #include "MCTargetDesc/NVPTXBaseInfo.h"
 #include "MCTargetDesc/NVPTXInstPrinter.h"
 #include "MCTargetDesc/NVPTXMCAsmInfo.h"
 #include "MCTargetDesc/NVPTXTargetStreamer.h"
 #include "NVPTX.h"
+#include "NVPTXDataType.h"
 #include "NVPTXDwarfDebug.h"
 #include "NVPTXMCExpr.h"
 #include "NVPTXMachineFunctionInfo.h"
@@ -1489,26 +1491,33 @@ void NVPTXAsmPrinter::emitFunctionParamList(const Function *F, raw_ostream &O) {
 
 void NVPTXAsmPrinter::setAndEmitFunctionVirtualRegisters(
     const MachineFunction &MF) {
-  SmallString<128> Str;
-  raw_svector_ostream O(Str);
+  // Nothing to do if we're using NullStreamer.
+  // TODO: Bailout much earlier in NVPTXAsmPrinter if streamer is null.
+  if (OutStreamer->isNull())
+    return;
+
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
 
   // Map the global virtual register number to a register class specific
   // virtual register number starting from 1 with that class.
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+  bool EmittedReg = false;
 
   // Emit the Fake Stack Object
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   int64_t NumBytes = MFI.getStackSize();
   if (NumBytes) {
-    O << "\t.local .align " << MFI.getMaxAlign().value() << " .b8 \t"
-      << DEPOTNAME << getFunctionNumber() << "[" << NumBytes << "];\n";
-    if (static_cast<const NVPTXTargetMachine &>(MF.getTarget()).is64Bit()) {
-      O << "\t.reg .b64 \t%SP;\n"
-        << "\t.reg .b64 \t%SPL;\n";
-    } else {
-      O << "\t.reg .b32 \t%SP;\n"
-        << "\t.reg .b32 \t%SPL;\n";
-    }
+    NVPTXDataType B8Ty(8 /*BitSize*/, NVPTXDataType::BasicType::Bits);
+    std::string Name = DEPOTNAME + Twine(getFunctionNumber()).str();
+    PTXStreamer->emitLocalVariable(B8Ty, Name, MFI.getMaxAlign().value(),
+                                   NumBytes);
+    unsigned RegSize =
+        static_cast<const NVPTXTargetMachine &>(MF.getTarget()).is64Bit() ? 64
+                                                                          : 32;
+    NVPTXDataType RegTy(RegSize, NVPTXDataType::BasicType::Bits);
+    PTXStreamer->emitRegisterVariable(RegTy, "%SP");
+    PTXStreamer->emitRegisterVariable(RegTy, "%SPL");
+    EmittedReg = true;
   }
 
   // Go through all virtual registers to establish the mapping between the
@@ -1530,13 +1539,16 @@ void NVPTXAsmPrinter::setAndEmitFunctionVirtualRegisters(
 
     // Only declare those registers that may be used.
     if (N) {
-      const StringRef RCName = getNVPTXRegClassName(RC);
+      NVPTXDataType RCType = getNVPTXRegType(RC);
       const StringRef RCStr = getNVPTXRegClassStr(RC);
-      O << "\t.reg " << RCName << " \t" << RCStr << "<" << (N + 1) << ">;\n";
+      PTXStreamer->emitRegisterVariable(RCType, RCStr, N + 1);
+      EmittedReg = true;
     }
   }
 
-  OutStreamer->emitRawText(O.str());
+  // If no register was emitted, emit a newline.
+  if (!EmittedReg)
+    PTXStreamer->EmitEOL();
 }
 
 /// Translate virtual register numbers in DebugInfo locations to their printed

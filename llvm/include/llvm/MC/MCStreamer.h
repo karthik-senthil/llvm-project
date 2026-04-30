@@ -323,6 +323,8 @@ public:
   MCContext &getContext() const { return Context; }
   bool isObj() const { return IsObj; }
 
+  virtual bool isNull() const { return false; }
+
   // MCObjectStreamer has an MCAssembler and allows more expression folding at
   // parse time.
   virtual MCAssembler *getAssemblerPtr() { return nullptr; }
