@@ -738,13 +738,15 @@ public:
   /// match a native machine width.
   /// \param Loc - The location of the expression for error reporting.
   virtual void emitValueImpl(const MCExpr *Value, unsigned Size,
-                             SMLoc Loc = SMLoc());
+                             SMLoc Loc = SMLoc(), bool EmitDelimit = false);
 
-  void emitValue(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc());
+  void emitValue(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc(),
+                 bool EmitDelimit = false);
 
   /// Special case of EmitValue that avoids the client having
   /// to pass in a MCExpr for constant integers.
-  virtual void emitIntValue(uint64_t Value, unsigned Size);
+  virtual void emitIntValue(uint64_t Value, unsigned Size,
+                            bool EmitDelimit = false);
   virtual void emitIntValue(const APInt &Value);
 
   /// Special case of EmitValue that avoids the client having to pass

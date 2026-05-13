@@ -213,7 +213,7 @@ void MCObjectStreamer::emitCFISections(bool EH, bool Debug, bool SFrame) {
 }
 
 void MCObjectStreamer::emitValueImpl(const MCExpr *Value, unsigned Size,
-                                     SMLoc Loc) {
+                                     SMLoc Loc, bool EmitDelimit) {
   MCStreamer::emitValueImpl(Value, Size, Loc);
 
   MCDwarfLineEntry::make(this, getCurrentSectionOnly());

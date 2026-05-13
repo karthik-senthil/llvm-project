@@ -4052,7 +4052,8 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *C,
                                    AsmPrinter &AP,
                                    const Constant *BaseCV = nullptr,
                                    uint64_t Offset = 0,
-                                   AsmPrinter::AliasMapTy *AliasList = nullptr);
+                                   AsmPrinter::AliasMapTy *AliasList = nullptr,
+                                   bool EmitDelimit = false);
 
 static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP);
 static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP);
@@ -4143,8 +4144,9 @@ static void emitGlobalConstantDataSequential(
       if (AP.isVerbose())
         AP.OutStreamer->getCommentOS()
             << format("0x%" PRIx64 "\n", CDS->getElementAsInteger(I));
-      AP.OutStreamer->emitIntValue(CDS->getElementAsInteger(I),
-                                   ElementByteSize);
+      bool EmitDelimit = I < (CDS->getNumElements() - 1);
+      AP.OutStreamer->emitIntValue(CDS->getElementAsInteger(I), ElementByteSize,
+                                   EmitDelimit);
     }
   } else {
     Type *ET = CDS->getElementType();
@@ -4175,8 +4177,9 @@ static void emitGlobalConstantArray(const DataLayout &DL,
     AP.OutStreamer->emitFill(Bytes, Value);
   } else {
     for (unsigned I = 0, E = CA->getNumOperands(); I != E; ++I) {
+      bool EmitDelimit = I < (CA->getNumOperands() - 1);
       emitGlobalConstantImpl(DL, CA->getOperand(I), AP, BaseCV, Offset,
-                             AliasList);
+                             AliasList, EmitDelimit);
       Offset += DL.getTypeAllocSize(CA->getOperand(I)->getType());
     }
   }
@@ -4212,7 +4215,9 @@ static void emitGlobalConstantVector(const DataLayout &DL, const Constant *CV,
   } else {
     for (unsigned I = 0, E = VTy->getNumElements(); I != E; ++I) {
       emitGlobalAliasInline(AP, DL.getTypeAllocSize(CV->getType()) * I, AliasList);
-      emitGlobalConstantImpl(DL, CV->getAggregateElement(I), AP);
+      bool EmitDelimit = I < (VTy->getNumElements() - 1);
+      emitGlobalConstantImpl(DL, CV->getAggregateElement(I), AP, nullptr, 0,
+                             nullptr, EmitDelimit);
     }
     EmittedSize = DL.getTypeAllocSize(ElementType) * VTy->getNumElements();
   }
@@ -4460,7 +4465,8 @@ static void handleIndirectSymViaGOTPCRel(AsmPrinter &AP, const MCExpr **ME,
 static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
                                    AsmPrinter &AP, const Constant *BaseCV,
                                    uint64_t Offset,
-                                   AsmPrinter::AliasMapTy *AliasList) {
+                                   AsmPrinter::AliasMapTy *AliasList,
+                                   bool EmitDelimit) {
   assert((!AliasList || AP.TM.getTargetTriple().isOSBinFormatXCOFF()) &&
          "AliasList only expected for XCOFF");
   emitGlobalAliasInline(AP, Offset, AliasList);
@@ -4505,7 +4511,7 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
       if (AP.isVerbose())
         AP.OutStreamer->getCommentOS()
             << format("0x%" PRIx64 "\n", CI->getZExtValue());
-      AP.OutStreamer->emitIntValue(CI->getZExtValue(), StoreSize);
+      AP.OutStreamer->emitIntValue(CI->getZExtValue(), StoreSize, EmitDelimit);
     } else {
       emitGlobalConstantLargeInt(CI, AP);
     }

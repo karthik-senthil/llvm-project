@@ -175,15 +175,21 @@ private:
                        const char *Modifier = nullptr);
   void printModuleLevelGV(const GlobalVariable *GVar, raw_ostream &O,
                           bool processDemoted, const NVPTXSubtarget &STI);
+  void emitModuleLevelGV(const GlobalVariable *GVar, bool processDemoted,
+                         const NVPTXSubtarget &STI);
   void emitGlobals(const Module &M);
+  void emitGlobalsPTXStreamer(const Module &M);
   void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override;
   void emitHeader(Module &M, const NVPTXSubtarget &STI);
   void emitKernelFunctionDirectives(const Function &F, raw_ostream &O) const;
   void emitVirtualRegister(unsigned int vr, raw_ostream &);
   void emitFunctionParamList(const Function *, raw_ostream &O);
+  void getFunctionParamList(const Function *,
+                            SmallVectorImpl<NVPTXFuncParam> &Params);
   void setAndEmitFunctionVirtualRegisters(const MachineFunction &MF);
   void encodeDebugInfoRegisterNumbers(const MachineFunction &MF);
   void printReturnValStr(const Function *, raw_ostream &O);
+  NVPTXFuncParam getReturnValParam(const Function *);
   void printReturnValStr(const MachineFunction &MF, raw_ostream &O);
   bool PrintAsmOperand(const MachineInstr *MI, unsigned OpNo,
                        const char *ExtraCode, raw_ostream &) override;
@@ -224,8 +230,12 @@ private:
 
   void emitPTXGlobalVariable(const GlobalVariable *GVar, raw_ostream &O,
                              const NVPTXSubtarget &STI);
+  bool emitPTXGlobalVariableDecl(const GlobalVariable *GVar,
+                                 const NVPTXSubtarget &STI,
+                                 NVPTXLinkage Linkage, bool HasInit);
   void emitPTXAddressSpace(unsigned int AddressSpace, raw_ostream &O) const;
   std::string getPTXFundamentalTypeStr(Type *Ty, bool = true) const;
+  NVPTXDataType getPTXFundamentalType(Type *Ty, bool = true) const;
   void printScalarConstant(const Constant *CPV, raw_ostream &O);
   void printFPConstant(const ConstantFP *Fp, raw_ostream &O) const;
   void bufferLEByte(const Constant *CPV, int Bytes, AggBuffer *aggBuffer);
@@ -233,10 +243,12 @@ private:
   void bufferAggregateConstVec(const ConstantVector *CV, AggBuffer *aggBuffer);
 
   void emitLinkageDirective(const GlobalValue *V, raw_ostream &O);
+  NVPTXLinkage getLinkage(const GlobalValue *V);
   void emitDeclarations(const Module &, raw_ostream &O);
   void emitDeclaration(const Function *, raw_ostream &O);
   void emitAliasDeclaration(const GlobalAlias *, raw_ostream &O);
   void emitDeclarationWithName(const Function *, MCSymbol *, raw_ostream &O);
+  void emitDeclarationPTXStreamer(const Function *);
   void emitDemotedVars(const Function *, raw_ostream &);
 
   bool isLoopHeaderOfNoUnroll(const MachineBasicBlock &MBB) const;

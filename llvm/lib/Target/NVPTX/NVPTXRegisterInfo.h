@@ -13,7 +13,7 @@
 #ifndef LLVM_LIB_TARGET_NVPTX_NVPTXREGISTERINFO_H
 #define LLVM_LIB_TARGET_NVPTX_NVPTXREGISTERINFO_H
 
-#include "NVPTXDataType.h"
+#include "NVPTXHelperClasses.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/Support/StringSaver.h"
 #include <sstream>

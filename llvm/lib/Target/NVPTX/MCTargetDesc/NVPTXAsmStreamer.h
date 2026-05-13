@@ -13,7 +13,7 @@
 #ifndef LLVM_LIB_TARGET_NVPTX_MCTARGETDESC_NVPTXASMSTREAMER_H
 #define LLVM_LIB_TARGET_NVPTX_MCTARGETDESC_NVPTXASMSTREAMER_H
 
-#include "NVPTXDataType.h"
+#include "NVPTXHelperClasses.h"
 #include "llvm/MC/MCAsmBackend.h"
 #include "llvm/MC/MCAsmInfo.h"
 #include "llvm/MC/MCAsmStreamer.h"
@@ -24,6 +24,7 @@
 #include "llvm/MC/MCObjectWriter.h"
 #include "llvm/MC/MCTargetOptions.h"
 #include "llvm/Support/FormattedStream.h"
+#include "llvm/Support/NVPTXAddrSpace.h"
 
 namespace llvm {
 
@@ -67,6 +68,44 @@ class NVPTXAsmStreamer final : public MCAsmBaseStreamer {
   void emitAlignment(unsigned Alignment) {
     if (Alignment)
       OS << ".align " << Alignment;
+  }
+
+  void emitLinkage(NVPTXLinkage Linkage) {
+    switch (Linkage) {
+    case NVPTXLinkage::Extern:
+      OS << ".extern";
+      break;
+    case NVPTXLinkage::Visible:
+      OS << ".visible";
+      break;
+    case NVPTXLinkage::Weak:
+      OS << ".weak";
+      break;
+    case NVPTXLinkage::Common:
+      OS << ".common";
+      break;
+    default:
+      llvm_unreachable("Unknown PTX linkage directive");
+    }
+  }
+
+  void emitPTXAddrSpace(unsigned AddrSpace) {
+    switch (AddrSpace) {
+    default:
+      break;
+    case NVPTXAS::ADDRESS_SPACE_GLOBAL:
+      OS << ".global";
+      break;
+    case NVPTXAS::ADDRESS_SPACE_SHARED:
+      OS << ".shared";
+      break;
+    case NVPTXAS::ADDRESS_SPACE_CONST:
+      OS << ".const";
+      break;
+    case NVPTXAS::ADDRESS_SPACE_LOCAL:
+      OS << ".local";
+      break;
+    }
   }
 
   /// Helper to emit PTX data type.
@@ -125,10 +164,11 @@ public:
   void emitBytes(StringRef Data) override;
 
   /// Customized version to emit values in PTX without needing a directive.
-  void emitValueImpl(const MCExpr *Value, unsigned Size,
-                     SMLoc Loc = SMLoc()) override;
+  void emitValueImpl(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc(),
+                     bool EmitDelimit = false) override;
 
-  void emitIntValue(uint64_t Value, unsigned Size) override;
+  void emitIntValue(uint64_t Value, unsigned Size,
+                    bool EmitDelimit = false) override;
 
   void emitLabel(MCSymbol *Symbol, SMLoc Loc = SMLoc()) override;
 
@@ -179,6 +219,19 @@ public:
   /// .reg .<Ty>    Name<Parameter>
   void emitRegisterVariable(NVPTXDataType Ty, StringRef Name,
                             unsigned Parameter = 0);
+
+  void emitParameter(NVPTXFuncParam Param, bool PrefixTab = false);
+
+  void emitFunctionDecl(NVPTXFuncDecl PTXFunc);
+
+  void emitOpaqueTyGlobal(NVPTXLinkage Linkage, PTXOpaqueType OpaqueType,
+                          StringRef Name, bool NeedInitForSampler,
+                          unsigned Sample);
+
+  void emitGlobalVariable(NVPTXLinkage Linkage, unsigned AddrSpace,
+                          bool HasAttrManaged, unsigned Alignment,
+                          NVPTXDataType Ty, MCSymbol *Sym, unsigned NumArrElems,
+                          bool HasInit);
 };
 } // namespace llvm
 
