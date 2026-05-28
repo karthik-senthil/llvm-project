@@ -179,6 +179,7 @@ private:
                          const NVPTXSubtarget &STI);
   void emitGlobals(const Module &M);
   void emitGlobalsPTXStreamer(const Module &M);
+  void emitGlobalConstantStruct(const ConstantStruct *CVS);
   void emitGlobalAlias(const Module &M, const GlobalAlias &GA) override;
   void emitHeader(Module &M, const NVPTXSubtarget &STI);
   void emitKernelFunctionDirectives(const Function &F, raw_ostream &O) const;

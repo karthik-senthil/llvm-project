@@ -187,8 +187,11 @@ void NVPTXAsmStreamer::emitValueImpl(const MCExpr *Value, unsigned Size,
 }
 
 void NVPTXAsmStreamer::emitBytes(StringRef Data) {
-  MCTargetStreamer *TS = getTargetStreamer();
-  TS->emitRawBytes(Data);
+  for (auto [I, C] : llvm::enumerate(Data.bytes())) {
+    OS << (unsigned)C;
+    if (I < Data.size() - 1)
+      OS << ", ";
+  }
 }
 
 void NVPTXAsmStreamer::emitLabel(MCSymbol *Symbol, SMLoc Loc) {
@@ -679,7 +682,7 @@ void NVPTXAsmStreamer::emitGlobalVariable(NVPTXLinkage Linkage,
                                           unsigned AddrSpace,
                                           bool HasAttrManaged,
                                           unsigned Alignment, NVPTXDataType Ty,
-                                          MCSymbol *Sym, unsigned NumArrElems,
+                                          MCSymbol *Sym, uint64_t NumArrElems,
                                           bool HasInit) {
   emitLinkage(Linkage);
   OS << " ";

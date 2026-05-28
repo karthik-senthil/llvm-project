@@ -764,8 +764,9 @@ public:
   /// Special case of EmitValue that avoids the client having to pass
   /// in a MCExpr for constant integers & prints in Hex format for certain
   /// modes, pads the field with leading zeros to Size width
-  virtual void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size) {
-    emitIntValue(Value, Size);
+  virtual void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size,
+                                            bool EmitDelimit = false) {
+    emitIntValue(Value, Size, EmitDelimit);
   }
 
   virtual void emitULEB128Value(const MCExpr *Value);

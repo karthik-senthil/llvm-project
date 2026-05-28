@@ -265,7 +265,8 @@ public:
   void emitIntValue(uint64_t Value, unsigned Size,
                     bool EmitDelimit = false) override;
   void emitIntValueInHex(uint64_t Value, unsigned Size) override;
-  void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size) override;
+  void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size,
+                                    bool EmitDelimit = false) override;
 
   void emitULEB128Value(const MCExpr *Value) override;
 
@@ -1357,8 +1358,8 @@ void MCAsmStreamer::emitIntValueInHex(uint64_t Value, unsigned Size) {
   emitValue(MCConstantExpr::create(Value, getContext(), true), Size);
 }
 
-void MCAsmStreamer::emitIntValueInHexWithPadding(uint64_t Value,
-                                                 unsigned Size) {
+void MCAsmStreamer::emitIntValueInHexWithPadding(uint64_t Value, unsigned Size,
+                                                 bool EmitDelimit) {
   emitValue(MCConstantExpr::create(Value, getContext(), true, Size), Size);
 }
 

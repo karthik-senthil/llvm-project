@@ -230,7 +230,7 @@ public:
 
   void emitGlobalVariable(NVPTXLinkage Linkage, unsigned AddrSpace,
                           bool HasAttrManaged, unsigned Alignment,
-                          NVPTXDataType Ty, MCSymbol *Sym, unsigned NumArrElems,
+                          NVPTXDataType Ty, MCSymbol *Sym, uint64_t NumArrElems,
                           bool HasInit);
 };
 } // namespace llvm

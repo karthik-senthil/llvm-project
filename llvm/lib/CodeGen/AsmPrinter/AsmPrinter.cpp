@@ -4055,8 +4055,10 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *C,
                                    AsmPrinter::AliasMapTy *AliasList = nullptr,
                                    bool EmitDelimit = false);
 
-static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP);
-static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP);
+static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP,
+                                 bool EmitDelimit = false);
+static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP,
+                                 bool EmitDelimit = false);
 
 /// isRepeatedByteSequence - Determine whether the given value is
 /// composed of a repeated sequence of identical bytes and return the
@@ -4152,7 +4154,8 @@ static void emitGlobalConstantDataSequential(
     Type *ET = CDS->getElementType();
     for (uint64_t I = 0, E = CDS->getNumElements(); I != E; ++I) {
       emitGlobalAliasInline(AP, ElementByteSize * I, AliasList);
-      emitGlobalConstantFP(CDS->getElementAsAPFloat(I), ET, AP);
+      bool EmitDelimit = I < (CDS->getNumElements() - 1);
+      emitGlobalConstantFP(CDS->getElementAsAPFloat(I), ET, AP, EmitDelimit);
     }
   }
 
@@ -4185,7 +4188,8 @@ static void emitGlobalConstantArray(const DataLayout &DL,
   }
 }
 
-static void emitGlobalConstantLargeInt(const ConstantInt *CI, AsmPrinter &AP);
+static void emitGlobalConstantLargeInt(const ConstantInt *CI, AsmPrinter &AP,
+                                       bool EmitDelimit = false);
 
 static void emitGlobalConstantVector(const DataLayout &DL, const Constant *CV,
                                      AsmPrinter &AP,
@@ -4258,7 +4262,8 @@ static void emitGlobalConstantStruct(const DataLayout &DL,
          "Layout of constant struct may be incorrect!");
 }
 
-static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP) {
+static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP,
+                                 bool EmitDelimit) {
   assert(ET && "Unknown float type");
   APInt API = APF.bitcastToAPInt();
 
@@ -4290,11 +4295,16 @@ static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP) {
       AP.OutStreamer->emitIntValueInHexWithPadding(p[Chunk], sizeof(uint64_t));
   } else {
     unsigned Chunk;
-    for (Chunk = 0; Chunk < NumBytes / sizeof(uint64_t); ++Chunk)
-      AP.OutStreamer->emitIntValueInHexWithPadding(p[Chunk], sizeof(uint64_t));
+    unsigned NumChunks = NumBytes / sizeof(uint64_t);
+    for (Chunk = 0; Chunk < NumChunks; ++Chunk) {
+      bool EmitDelimitFP = Chunk < (NumChunks - 1) || EmitDelimit;
+      AP.OutStreamer->emitIntValueInHexWithPadding(p[Chunk], sizeof(uint64_t),
+                                                   EmitDelimitFP);
+    }
 
     if (TrailingBytes)
-      AP.OutStreamer->emitIntValueInHexWithPadding(p[Chunk], TrailingBytes);
+      AP.OutStreamer->emitIntValueInHexWithPadding(p[Chunk], TrailingBytes,
+                                                   EmitDelimit);
   }
 
   // Emit the tail padding for the long double.
@@ -4302,13 +4312,14 @@ static void emitGlobalConstantFP(APFloat APF, Type *ET, AsmPrinter &AP) {
   AP.OutStreamer->emitZeros(DL.getTypeAllocSize(ET) - DL.getTypeStoreSize(ET));
 }
 
-static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP) {
-  emitGlobalConstantFP(CFP->getValueAPF(), CFP->getType(), AP);
+static void emitGlobalConstantFP(const ConstantFP *CFP, AsmPrinter &AP,
+                                 bool EmitDelimit) {
+  emitGlobalConstantFP(CFP->getValueAPF(), CFP->getType(), AP, EmitDelimit);
 }
 
 static void emitGlobalConstantLargeAPInt(const APInt &Val,
-                                         uint64_t TypeStoreSize,
-                                         AsmPrinter &AP) {
+                                         uint64_t TypeStoreSize, AsmPrinter &AP,
+                                         bool EmitDelimit) {
   const DataLayout &DL = AP.getDataLayout();
   unsigned BitWidth = Val.getBitWidth();
 
@@ -4349,8 +4360,9 @@ static void emitGlobalConstantLargeAPInt(const APInt &Val,
   // quantities at a time.
   const uint64_t *RawData = Realigned.getRawData();
   for (unsigned i = 0, e = BitWidth / 64; i != e; ++i) {
+    bool EmitDelimitLargeInt = i < (e - 1) || EmitDelimit;
     uint64_t ChunkVal = DL.isBigEndian() ? RawData[e - i - 1] : RawData[i];
-    AP.OutStreamer->emitIntValue(ChunkVal, 8);
+    AP.OutStreamer->emitIntValue(ChunkVal, 8, EmitDelimitLargeInt);
   }
 
   if (ExtraBitsSize) {
@@ -4369,12 +4381,15 @@ static void emitGlobalConstantLargeAPInt(const APInt &Val,
 static void emitGlobalConstantLargeByte(const ConstantByte *CB,
                                         AsmPrinter &AP) {
   emitGlobalConstantLargeAPInt(
-      CB->getValue(), AP.getDataLayout().getTypeStoreSize(CB->getType()), AP);
+      CB->getValue(), AP.getDataLayout().getTypeStoreSize(CB->getType()), AP,
+      false /*EmitDelimit*/);
 }
 
-static void emitGlobalConstantLargeInt(const ConstantInt *CI, AsmPrinter &AP) {
+static void emitGlobalConstantLargeInt(const ConstantInt *CI, AsmPrinter &AP,
+                                       bool EmitDelimit) {
   emitGlobalConstantLargeAPInt(
-      CI->getValue(), AP.getDataLayout().getTypeStoreSize(CI->getType()), AP);
+      CI->getValue(), AP.getDataLayout().getTypeStoreSize(CI->getType()), AP,
+      EmitDelimit);
 }
 
 /// Transform a not absolute MCExpr containing a reference to a GOT
@@ -4513,7 +4528,7 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
             << format("0x%" PRIx64 "\n", CI->getZExtValue());
       AP.OutStreamer->emitIntValue(CI->getZExtValue(), StoreSize, EmitDelimit);
     } else {
-      emitGlobalConstantLargeInt(CI, AP);
+      emitGlobalConstantLargeInt(CI, AP, EmitDelimit);
     }
 
     // Emit tail padding if needed
@@ -4548,7 +4563,7 @@ static void emitGlobalConstantImpl(const DataLayout &DL, const Constant *CV,
     if (isa<VectorType>(CV->getType()))
       return emitGlobalConstantVector(DL, CV, AP, AliasList);
     else
-      return emitGlobalConstantFP(CFP, AP);
+      return emitGlobalConstantFP(CFP, AP, EmitDelimit);
   }
 
   if (isa<ConstantPointerNull>(CV)) {

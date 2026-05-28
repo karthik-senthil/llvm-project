@@ -1220,6 +1220,60 @@ void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
   O << ";\n";
 }
 
+static void serializeConstantAsBytes(const Constant *C,
+                                     SmallVectorImpl<uint8_t> &Bytes) {
+  APInt V;
+
+  if (auto *CI = dyn_cast<ConstantInt>(C))
+    V = CI->getValue();
+  else if (auto *CFP = dyn_cast<ConstantFP>(C))
+    V = CFP->getValueAPF().bitcastToAPInt();
+  else
+    llvm_unreachable("Unsupported constant type for serialization.\n");
+
+  unsigned NumBytes = V.getBitWidth() / 8;
+  for (unsigned I = 0; I < NumBytes; ++I)
+    Bytes.push_back(V.extractBitsAsZExtValue(8, I * 8));
+}
+
+void NVPTXAsmPrinter::emitGlobalConstantStruct(const ConstantStruct *CVS) {
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
+  const DataLayout &DL = getDataLayout();
+  uint64_t Size = DL.getTypeAllocSize(CVS->getType());
+  const StructLayout *Layout = DL.getStructLayout(CVS->getType());
+  uint64_t SizeSoFar = 0;
+  for (unsigned I = 0, E = CVS->getNumOperands(); I != E; ++I) {
+    const Constant *Field = CVS->getOperand(I);
+
+    SmallVector<uint8_t, 256> FieldAsBytes;
+    serializeConstantAsBytes(Field, FieldAsBytes);
+
+    bool EmitDelimit = I < (E - 1);
+    for (auto [Idx, Byte] : llvm::enumerate(FieldAsBytes)) {
+      bool EmitDelimitByte = Idx < (FieldAsBytes.size() - 1) || EmitDelimit;
+      PTXStreamer->emitIntValue(Byte, 8, EmitDelimitByte);
+    }
+
+    // Check if padding is needed and insert one or more 0s.
+    uint64_t FieldSize = DL.getTypeAllocSize(Field->getType());
+    uint64_t PadSize = ((I == E - 1 ? Size : Layout->getElementOffset(I + 1)) -
+                        Layout->getElementOffset(I)) -
+                       FieldSize;
+    SizeSoFar += FieldSize + PadSize;
+
+    // Insert padding - this may include padding to increase the size of the
+    // current field up to the ABI size (if the struct is not packed) as well
+    // as padding to ensure that the next field starts at the right offset.
+    if (EmitDelimit) {
+      for (unsigned I = 0; I < PadSize; ++I)
+        PTXStreamer->emitIntValue(0, 8, EmitDelimit);
+    }
+  }
+
+  assert(SizeSoFar == Layout->getSizeInBytes() &&
+         "Layout of constant struct may be incorrect!");
+}
+
 void NVPTXAsmPrinter::emitModuleLevelGV(const GlobalVariable *GVar,
                                         bool ProcessDemoted,
                                         const NVPTXSubtarget &STI) {
@@ -1340,7 +1394,11 @@ void NVPTXAsmPrinter::emitModuleLevelGV(const GlobalVariable *GVar,
   if (HasInit) {
     assert(Initializer && "Expected non-null initializer.");
     const DataLayout &DL = getDataLayout();
-    AsmPrinter::emitGlobalConstant(DL, Initializer);
+    bool IsStructTy = GVar->getValueType()->isStructTy();
+    if (!IsStructTy)
+      AsmPrinter::emitGlobalConstant(DL, Initializer);
+    else
+      emitGlobalConstantStruct(cast<ConstantStruct>(Initializer));
   }
 
   if (ArrayEmitted)
@@ -1641,18 +1699,7 @@ bool NVPTXAsmPrinter::emitPTXGlobalVariableDecl(const GlobalVariable *GV,
       GV->getAlign().value_or(DL.getPrefTypeAlign(ETy)).value();
 
   NVPTXDataType GVType;
-  unsigned NumArrElems = 0;
-
-  if (ETy->getScalarSizeInBits() == 128) {
-    if (ETy->isFloatingPointTy())
-      ETy = Type::getDoubleTy(ETy->getContext());
-    else
-      ETy = IntegerType::get(ETy->getContext(), 64);
-    NumArrElems = 2;
-  }
-
-  if (ETy->isIntegerTy(1))
-    ETy = IntegerType::get(ETy->getContext(), 8);
+  uint64_t NumArrElems = 0;
 
   switch (ETy->getTypeID()) {
   case Type::ArrayTyID: {
@@ -1669,6 +1716,17 @@ bool NVPTXAsmPrinter::emitPTXGlobalVariableDecl(const GlobalVariable *GV,
   }
   default:
     break;
+  }
+
+  if (ETy->isIntegerTy(1))
+    ETy = IntegerType::get(ETy->getContext(), 8);
+
+  if (ETy->getScalarSizeInBits() == 128) {
+    if (ETy->isFloatingPointTy())
+      ETy = Type::getDoubleTy(ETy->getContext());
+    else
+      ETy = IntegerType::get(ETy->getContext(), 64);
+    NumArrElems = NumArrElems ? NumArrElems * 2 : 2;
   }
 
   if (!ETy->isStructTy()) {
