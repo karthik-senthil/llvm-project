@@ -24,9 +24,9 @@ using namespace llvm;
 #define DEBUG_TYPE "nvptx-reg-info"
 
 namespace llvm {
-StringRef getNVPTXRegClassName(TargetRegisterClass const *RC) {
+NVPTXDataType getNVPTXRegType(TargetRegisterClass const *RC) {
   if (RC == &NVPTX::B128RegClass)
-    return ".b128";
+    return NVPTXDataType(128, NVPTXDataType::BasicType::Bits);
   if (RC == &NVPTX::B64RegClass)
     // We use untyped (.b) integer registers here as NVCC does.
     // Correctness of generated code does not depend on register type,
@@ -46,16 +46,16 @@ StringRef getNVPTXRegClassName(TargetRegisterClass const *RC) {
     //   .reg .s32 rs32
     //   add.f16v2 rb32,rb32,rb32; // OK
     //   add.f16v2 rs32,rs32,rs32; // OK
-    return ".b64";
+    return NVPTXDataType(64, NVPTXDataType::BasicType::Bits);
   if (RC == &NVPTX::B32RegClass)
-    return ".b32";
+    return NVPTXDataType(32, NVPTXDataType::BasicType::Bits);
   if (RC == &NVPTX::B16RegClass)
-    return ".b16";
+    return NVPTXDataType(16, NVPTXDataType::BasicType::Bits);
   if (RC == &NVPTX::B1RegClass)
-    return ".pred";
-  if (RC == &NVPTX::SpecialRegsRegClass)
-    return "!Special!";
-  return "INTERNAL";
+    return NVPTXDataType(1, NVPTXDataType::BasicType::Predicate);
+
+  // This covers both special and internal register classes.
+  return NVPTXDataType(1, NVPTXDataType::BasicType::Unknown);
 }
 
 StringRef getNVPTXRegClassStr(TargetRegisterClass const *RC) {

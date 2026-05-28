@@ -127,7 +127,7 @@ void MCStreamer::emitExplicitComments() {}
 
 /// EmitIntValue - Special case of EmitValue that avoids the client having to
 /// pass in a MCExpr for constant integers.
-void MCStreamer::emitIntValue(uint64_t Value, unsigned Size) {
+void MCStreamer::emitIntValue(uint64_t Value, unsigned Size, bool EmitDelimit) {
   assert(1 <= Size && Size <= 8 && "Invalid size");
   assert((isUIntN(8 * Size, Value) || isIntN(8 * Size, Value)) &&
          "Invalid size");
@@ -173,8 +173,9 @@ unsigned MCStreamer::emitSLEB128IntValue(int64_t Value) {
   return Tmp.size();
 }
 
-void MCStreamer::emitValue(const MCExpr *Value, unsigned Size, SMLoc Loc) {
-  emitValueImpl(Value, Size, Loc);
+void MCStreamer::emitValue(const MCExpr *Value, unsigned Size, SMLoc Loc,
+                           bool EmitDelimit) {
+  emitValueImpl(Value, Size, Loc, EmitDelimit);
 }
 
 void MCStreamer::emitSymbolValue(const MCSymbol *Sym, unsigned Size,
@@ -1354,7 +1355,8 @@ void MCStreamer::changeSection(MCSection *Sec, uint32_t) {
 void MCStreamer::emitWeakReference(MCSymbol *Alias, const MCSymbol *Symbol) {}
 void MCStreamer::emitBytes(StringRef Data) {}
 void MCStreamer::emitBinaryData(StringRef Data) { emitBytes(Data); }
-void MCStreamer::emitValueImpl(const MCExpr *Value, unsigned Size, SMLoc Loc) {
+void MCStreamer::emitValueImpl(const MCExpr *Value, unsigned Size, SMLoc Loc,
+                               bool EmitDelimit) {
   visitUsedExpr(*Value);
 }
 void MCStreamer::emitULEB128Value(const MCExpr *Value) {}

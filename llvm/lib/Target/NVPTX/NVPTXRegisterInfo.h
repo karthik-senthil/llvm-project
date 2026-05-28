@@ -13,6 +13,7 @@
 #ifndef LLVM_LIB_TARGET_NVPTX_NVPTXREGISTERINFO_H
 #define LLVM_LIB_TARGET_NVPTX_NVPTXREGISTERINFO_H
 
+#include "NVPTXHelperClasses.h"
 #include "llvm/CodeGen/TargetRegisterInfo.h"
 #include "llvm/Support/StringSaver.h"
 #include <sstream>
@@ -75,7 +76,7 @@ public:
   int64_t getDwarfRegNumForVirtReg(Register RegNum, bool isEH) const override;
 };
 
-StringRef getNVPTXRegClassName(const TargetRegisterClass *RC);
+NVPTXDataType getNVPTXRegType(const TargetRegisterClass *RC);
 StringRef getNVPTXRegClassStr(const TargetRegisterClass *RC);
 
 } // end namespace llvm

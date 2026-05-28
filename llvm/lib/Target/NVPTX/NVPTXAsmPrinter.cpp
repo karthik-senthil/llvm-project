@@ -12,12 +12,14 @@
 //===----------------------------------------------------------------------===//
 
 #include "NVPTXAsmPrinter.h"
+#include "MCTargetDesc/NVPTXAsmStreamer.h"
 #include "MCTargetDesc/NVPTXBaseInfo.h"
 #include "MCTargetDesc/NVPTXInstPrinter.h"
 #include "MCTargetDesc/NVPTXMCAsmInfo.h"
 #include "MCTargetDesc/NVPTXTargetStreamer.h"
 #include "NVPTX.h"
 #include "NVPTXDwarfDebug.h"
+#include "NVPTXHelperClasses.h"
 #include "NVPTXMCExpr.h"
 #include "NVPTXMachineFunctionInfo.h"
 #include "NVPTXRegisterInfo.h"
@@ -95,6 +97,11 @@
 using namespace llvm;
 
 #define DEPOTNAME "__local_depot"
+
+static cl::opt<bool> EmitGlobalsUsingPTXStreamer(
+    "emit-globals-ptx-streamer", cl::init(false), cl::Hidden,
+    cl::desc(
+        "Use new mechanism to emit global values based on PTX asm streamer."));
 
 static StringRef getTextureName(const Value &V) {
   assert(V.hasName() && "Found texture variable with no name");
@@ -288,6 +295,38 @@ void NVPTXAsmPrinter::printReturnValStr(const Function *F, raw_ostream &O) {
   } else
     llvm_unreachable("Unknown return type");
   O << ") ";
+}
+
+NVPTXFuncParam NVPTXAsmPrinter::getReturnValParam(const Function *F) {
+  const DataLayout &DL = getDataLayout();
+  const NVPTXSubtarget &STI = TM.getSubtarget<NVPTXSubtarget>(*F);
+  const auto *TLI = cast<NVPTXTargetLowering>(STI.getTargetLowering());
+
+  NVPTXFuncParam RetVal("func_retval0");
+
+  Type *Ty = F->getReturnType();
+  assert(!Ty->isVoidTy() && "void return type not expected here.");
+  unsigned RetValTySize;
+  if (shouldPassAsArray(Ty)) {
+    const unsigned TotalSize = DL.getTypeAllocSize(Ty);
+    const Align RetAlignment =
+        getFunctionArgumentAlignment(F, Ty, AttributeList::ReturnIndex, DL);
+    RetValTySize = 8;
+    RetVal.Alignment = RetAlignment.value();
+    RetVal.NumArrayElems = TotalSize;
+  } else if (Ty->isFloatingPointTy()) {
+    RetValTySize = promoteScalarArgumentSize(Ty->getPrimitiveSizeInBits());
+  } else if (auto *ITy = dyn_cast<IntegerType>(Ty)) {
+    RetValTySize = promoteScalarArgumentSize(ITy->getBitWidth());
+  } else if (Ty->isPointerTy()) {
+    RetValTySize =
+        promoteScalarArgumentSize(TLI->getPointerTy(DL).getSizeInBits());
+  } else
+    llvm_unreachable("Unknown return type");
+
+  RetVal.Type = NVPTXDataType(RetValTySize, NVPTXDataType::BasicType::Bits);
+
+  return RetVal;
 }
 
 void NVPTXAsmPrinter::printReturnValStr(const MachineFunction &MF,
@@ -535,6 +574,11 @@ void NVPTXAsmPrinter::emitDeclaration(const Function *F, raw_ostream &O) {
 
 void NVPTXAsmPrinter::emitDeclarationWithName(const Function *F, MCSymbol *S,
                                               raw_ostream &O) {
+  if (EmitGlobalsUsingPTXStreamer) {
+    emitDeclarationPTXStreamer(F);
+    return;
+  }
+
   emitLinkageDirective(F, O);
   if (isKernelFunction(*F))
     O << ".entry ";
@@ -548,6 +592,22 @@ void NVPTXAsmPrinter::emitDeclarationWithName(const Function *F, MCSymbol *S,
   if (shouldEmitPTXNoReturn(F, TM))
     O << ".noreturn";
   O << ";\n";
+}
+
+void NVPTXAsmPrinter::emitDeclarationPTXStreamer(const Function *F) {
+  NVPTXFuncDecl PTXFunc(getSymbol(F), isKernelFunction(*F));
+  PTXFunc.Linkage = getLinkage(F);
+  PTXFunc.HasRetVal = !F->getReturnType()->isVoidTy();
+  if (PTXFunc.HasRetVal)
+    PTXFunc.RetVal = getReturnValParam(F);
+  getFunctionParamList(F, PTXFunc.Params);
+  PTXFunc.EmitNoReturn = shouldEmitPTXNoReturn(F, TM);
+
+  if (OutStreamer->isNull())
+    return;
+
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
+  PTXStreamer->emitFunctionDecl(PTXFunc);
 }
 
 static bool usedInGlobalVarDef(const Constant *C) {
@@ -710,6 +770,11 @@ bool NVPTXAsmPrinter::doInitialization(Module &M) {
 }
 
 void NVPTXAsmPrinter::emitGlobals(const Module &M) {
+  if (EmitGlobalsUsingPTXStreamer) {
+    emitGlobalsPTXStreamer(M);
+    return;
+  }
+
   SmallString<128> Str2;
   raw_svector_ostream OS2(Str2);
 
@@ -741,6 +806,34 @@ void NVPTXAsmPrinter::emitGlobals(const Module &M) {
   OS2 << '\n';
 
   OutStreamer->emitRawText(OS2.str());
+}
+
+void NVPTXAsmPrinter::emitGlobalsPTXStreamer(const Module &M) {
+  raw_null_ostream OS;
+  emitDeclarations(M, OS);
+
+  // As ptxas does not support forward references of globals, we need to first
+  // sort the list of module-level globals in def-use order. We visit each
+  // global variable in order, and ensure that we emit it *after* its dependent
+  // globals. We use a little extra memory maintaining both a set and a list to
+  // have fast searches while maintaining a strict ordering.
+  SmallVector<const GlobalVariable *, 8> Globals;
+  DenseSet<const GlobalVariable *> GVVisited;
+  DenseSet<const GlobalVariable *> GVVisiting;
+
+  // Visit each global variable, in order
+  for (const GlobalVariable &I : M.globals())
+    VisitGlobalVariableForEmission(&I, Globals, GVVisited, GVVisiting);
+
+  assert(GVVisited.size() == M.global_size() && "Missed a global variable");
+  assert(GVVisiting.size() == 0 && "Did not fully process a global variable");
+
+  const NVPTXTargetMachine &NTM = static_cast<const NVPTXTargetMachine &>(TM);
+  const NVPTXSubtarget &STI = *NTM.getSubtargetImpl();
+
+  // Print out module-level global variables in proper order
+  for (const GlobalVariable *GV : Globals)
+    emitModuleLevelGV(GV, /*ProcessDemoted=*/false, STI);
 }
 
 void NVPTXAsmPrinter::emitGlobalAlias(const Module &M, const GlobalAlias &GA) {
@@ -848,6 +941,32 @@ void NVPTXAsmPrinter::emitLinkageDirective(const GlobalValue *V,
       O << ".weak ";
     }
   }
+}
+
+NVPTXLinkage NVPTXAsmPrinter::getLinkage(const GlobalValue *V) {
+  NVPTXLinkage Linkage = NVPTXLinkage::None;
+
+  bool IsCUDA =
+      static_cast<NVPTXTargetMachine &>(TM).getDrvInterface() == NVPTX::CUDA;
+  if (!IsCUDA)
+    return Linkage;
+
+  if (V->hasExternalLinkage()) {
+    if (auto *GVar = dyn_cast<GlobalVariable>(V))
+      Linkage =
+          GVar->hasInitializer() ? NVPTXLinkage::Visible : NVPTXLinkage::Extern;
+    else if (V->isDeclaration())
+      Linkage = NVPTXLinkage::Extern;
+    else
+      Linkage = NVPTXLinkage::Visible;
+  } else if (V->hasAppendingLinkage()) {
+    report_fatal_error("Symbol '" + (V->hasName() ? V->getName() : "") +
+                       "' has unsupported appending linkage type");
+  } else if (!V->hasInternalLinkage() && !V->hasPrivateLinkage()) {
+    Linkage = NVPTXLinkage::Weak;
+  }
+
+  return Linkage;
 }
 
 void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
@@ -1016,6 +1135,7 @@ void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
         if (!Initializer->isNullValue() && !isa<UndefValue>(Initializer)) {
           O << " = ";
           printScalarConstant(Initializer, O);
+          // AsmPrinter::emitGlobalConstant(DL, Initializer);
         }
       } else {
         // The frontend adds zero-initializer to device and constant variables
@@ -1098,6 +1218,193 @@ void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
     }
   }
   O << ";\n";
+}
+
+static void serializeConstantAsBytes(const Constant *C,
+                                     SmallVectorImpl<uint8_t> &Bytes) {
+  APInt V;
+
+  if (auto *CI = dyn_cast<ConstantInt>(C))
+    V = CI->getValue();
+  else if (auto *CFP = dyn_cast<ConstantFP>(C))
+    V = CFP->getValueAPF().bitcastToAPInt();
+  else
+    llvm_unreachable("Unsupported constant type for serialization.\n");
+
+  unsigned NumBytes = V.getBitWidth() / 8;
+  for (unsigned I = 0; I < NumBytes; ++I)
+    Bytes.push_back(V.extractBitsAsZExtValue(8, I * 8));
+}
+
+void NVPTXAsmPrinter::emitGlobalConstantStruct(const ConstantStruct *CVS) {
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
+  const DataLayout &DL = getDataLayout();
+  uint64_t Size = DL.getTypeAllocSize(CVS->getType());
+  const StructLayout *Layout = DL.getStructLayout(CVS->getType());
+  uint64_t SizeSoFar = 0;
+  for (unsigned I = 0, E = CVS->getNumOperands(); I != E; ++I) {
+    const Constant *Field = CVS->getOperand(I);
+
+    SmallVector<uint8_t, 256> FieldAsBytes;
+    serializeConstantAsBytes(Field, FieldAsBytes);
+
+    bool EmitDelimit = I < (E - 1);
+    for (auto [Idx, Byte] : llvm::enumerate(FieldAsBytes)) {
+      bool EmitDelimitByte = Idx < (FieldAsBytes.size() - 1) || EmitDelimit;
+      PTXStreamer->emitIntValue(Byte, 8, EmitDelimitByte);
+    }
+
+    // Check if padding is needed and insert one or more 0s.
+    uint64_t FieldSize = DL.getTypeAllocSize(Field->getType());
+    uint64_t PadSize = ((I == E - 1 ? Size : Layout->getElementOffset(I + 1)) -
+                        Layout->getElementOffset(I)) -
+                       FieldSize;
+    SizeSoFar += FieldSize + PadSize;
+
+    // Insert padding - this may include padding to increase the size of the
+    // current field up to the ABI size (if the struct is not packed) as well
+    // as padding to ensure that the next field starts at the right offset.
+    if (EmitDelimit) {
+      for (unsigned I = 0; I < PadSize; ++I)
+        PTXStreamer->emitIntValue(0, 8, EmitDelimit);
+    }
+  }
+
+  assert(SizeSoFar == Layout->getSizeInBytes() &&
+         "Layout of constant struct may be incorrect!");
+}
+
+void NVPTXAsmPrinter::emitModuleLevelGV(const GlobalVariable *GVar,
+                                        bool ProcessDemoted,
+                                        const NVPTXSubtarget &STI) {
+  if (OutStreamer->isNull())
+    return;
+
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
+
+  // Skip meta data
+  if (GVar->hasSection())
+    if (GVar->getSection() == "llvm.metadata")
+      return;
+
+  // Skip LLVM intrinsic global variables
+  if (GVar->getName().starts_with("llvm.") ||
+      GVar->getName().starts_with("nvvm."))
+    return;
+
+  NVPTXLinkage GVLinkage = NVPTXLinkage::None;
+  if (GVar->hasExternalLinkage()) {
+    GVLinkage =
+        GVar->hasInitializer() ? NVPTXLinkage::Visible : NVPTXLinkage::Extern;
+  } else if (STI.getPTXVersion() >= 50 && GVar->hasCommonLinkage() &&
+             GVar->getAddressSpace() == ADDRESS_SPACE_GLOBAL) {
+    GVLinkage = NVPTXLinkage::Common;
+  } else if (GVar->hasLinkOnceLinkage() || GVar->hasWeakLinkage() ||
+             GVar->hasAvailableExternallyLinkage() ||
+             GVar->hasCommonLinkage()) {
+    GVLinkage = NVPTXLinkage::Weak;
+  }
+
+  const PTXOpaqueType OpaqueType = getPTXOpaqueType(*GVar);
+  if (OpaqueType != PTXOpaqueType::None) {
+    std::string Name;
+    switch (OpaqueType) {
+    case PTXOpaqueType::Texture: {
+      Name = getTextureName(*GVar);
+      break;
+    }
+    case PTXOpaqueType::Surface: {
+      Name = getSurfaceName(*GVar);
+      break;
+    }
+    case PTXOpaqueType::Sampler: {
+      Name = getSamplerName(*GVar);
+      break;
+    }
+    default:
+      llvm_unreachable("Unknown opaque tyep");
+    }
+
+    bool NeedInitForSampler = false;
+    unsigned Sample = 0;
+
+    // Handle initializer for sampler GVs
+    if (OpaqueType == PTXOpaqueType::Sampler) {
+      if (GVar->hasInitializer()) {
+        const Constant *Initializer = GVar->getInitializer();
+        if (auto *CI = dyn_cast<ConstantInt>(Initializer)) {
+          NeedInitForSampler = true;
+          Sample = CI->getZExtValue();
+        }
+      }
+    }
+
+    PTXStreamer->emitOpaqueTyGlobal(GVLinkage, OpaqueType, Name,
+                                    NeedInitForSampler, Sample);
+    return;
+  }
+
+  if (GVar->isDeclaration()) {
+    // (extern) declarations, no definition or initializer
+    // Currently the only known declaration is for an automatic __local
+    // (.shared) promoted to global.
+    emitPTXGlobalVariableDecl(GVar, STI, GVLinkage, false /*HasInit*/);
+    return;
+  }
+
+  if (GVar->hasPrivateLinkage()) {
+    if (GVar->getName().starts_with("unrollpragma"))
+      return;
+
+    // FIXME - need better way (e.g. Metadata) to avoid generating this global
+    if (GVar->getName().starts_with("filename"))
+      return;
+    if (GVar->use_empty())
+      return;
+  }
+
+  const Function *DemotedFunc = nullptr;
+  if (!ProcessDemoted && canDemoteGlobalVar(GVar, DemotedFunc)) {
+    PTXStreamer->emitRawText("// " + GVar->getName() + " has been demoted");
+    localDecls[DemotedFunc].push_back(GVar);
+    return;
+  }
+
+  bool HasInit = false;
+  unsigned AddrSpace = GVar->getAddressSpace();
+  const Constant *Initializer = nullptr;
+  if (GVar->hasInitializer()) {
+    Initializer = GVar->getInitializer();
+    if (AddrSpace == ADDRESS_SPACE_GLOBAL || AddrSpace == ADDRESS_SPACE_CONST) {
+      HasInit = !Initializer->isNullValue() && !isa<UndefValue>(Initializer);
+    } else {
+      // The frontend adds zero-initializer to device and constant variables
+      // that don't have an initial value, and UndefValue to shared
+      // variables, so skip warning for this case.
+      if (!Initializer->isNullValue() && !isa<UndefValue>(Initializer)) {
+        report_fatal_error("initial value of '" + GVar->getName() +
+                           "' is not allowed in addrspace(" + Twine(AddrSpace) +
+                           ")");
+      }
+    }
+  }
+
+  bool ArrayEmitted = emitPTXGlobalVariableDecl(GVar, STI, GVLinkage, HasInit);
+
+  if (HasInit) {
+    assert(Initializer && "Expected non-null initializer.");
+    const DataLayout &DL = getDataLayout();
+    bool IsStructTy = GVar->getValueType()->isStructTy();
+    if (!IsStructTy)
+      AsmPrinter::emitGlobalConstant(DL, Initializer);
+    else
+      emitGlobalConstantStruct(cast<ConstantStruct>(Initializer));
+  }
+
+  if (ArrayEmitted)
+    PTXStreamer->emitRawText("};");
+  else
+    PTXStreamer->emitRawText(";");
 }
 
 void NVPTXAsmPrinter::AggBuffer::printSymbol(unsigned nSym, raw_ostream &os) {
@@ -1266,6 +1573,51 @@ NVPTXAsmPrinter::getPTXFundamentalTypeStr(Type *Ty, bool useB4PTR) const {
   llvm_unreachable("unexpected type");
 }
 
+NVPTXDataType NVPTXAsmPrinter::getPTXFundamentalType(Type *Ty,
+                                                     bool UseB4Ptr) const {
+  unsigned TySize = 0;
+  NVPTXDataType::BasicType BasicTy;
+  switch (Ty->getTypeID()) {
+  case Type::IntegerTyID: {
+    TySize = cast<IntegerType>(Ty)->getBitWidth();
+    BasicTy = TySize == 1 ? NVPTXDataType::BasicType::Predicate
+                          : NVPTXDataType::BasicType::Unsigned;
+    if (TySize > 64)
+      llvm_unreachable("Integer too large");
+    break;
+  }
+  case Type::BFloatTyID:
+  case Type::HalfTyID: {
+    // fp16 and bf16 are stored as .b16 for compatibility with pre-sm_53
+    // PTX assembly.
+    TySize = 16;
+    BasicTy = NVPTXDataType::BasicType::Bits;
+    break;
+  }
+  case Type::FloatTyID: {
+    TySize = 32;
+    BasicTy = NVPTXDataType::BasicType::FloatingPoint;
+    break;
+  }
+  case Type::DoubleTyID: {
+    TySize = 64;
+    BasicTy = NVPTXDataType::BasicType::FloatingPoint;
+    break;
+  }
+  case Type::PointerTyID: {
+    TySize = TM.getPointerSizeInBits(Ty->getPointerAddressSpace());
+    assert((TySize == 64 || TySize == 32) && "Unexpected pointer size");
+    BasicTy = UseB4Ptr ? NVPTXDataType::BasicType::Bits
+                       : NVPTXDataType::BasicType::Unsigned;
+    break;
+  }
+  default:
+    llvm_unreachable("unexpected type");
+  }
+
+  return NVPTXDataType(TySize, BasicTy);
+}
+
 void NVPTXAsmPrinter::emitPTXGlobalVariable(const GlobalVariable *GVar,
                                             raw_ostream &O,
                                             const NVPTXSubtarget &STI) {
@@ -1322,6 +1674,72 @@ void NVPTXAsmPrinter::emitPTXGlobalVariable(const GlobalVariable *GVar,
   default:
     llvm_unreachable("type not supported yet");
   }
+}
+
+bool NVPTXAsmPrinter::emitPTXGlobalVariableDecl(const GlobalVariable *GV,
+                                                const NVPTXSubtarget &STI,
+                                                NVPTXLinkage Linkage,
+                                                bool HasInit) {
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
+  const DataLayout &DL = getDataLayout();
+  // GlobalVariables are always constant pointers themselves.
+  Type *ETy = GV->getValueType();
+
+  unsigned AddrSpace = GV->getType()->getAddressSpace();
+  bool HasAttrManaged = false;
+  if (isManaged(*GV)) {
+    if (STI.getPTXVersion() < 40 || STI.getSmVersion() < 30)
+      report_fatal_error(
+          ".attribute(.managed) requires PTX version >= 4.0 and sm_30");
+
+    HasAttrManaged = true;
+  }
+
+  unsigned Alignment =
+      GV->getAlign().value_or(DL.getPrefTypeAlign(ETy)).value();
+
+  NVPTXDataType GVType;
+  uint64_t NumArrElems = 0;
+
+  switch (ETy->getTypeID()) {
+  case Type::ArrayTyID: {
+    auto *ATy = cast<ArrayType>(ETy);
+    NumArrElems = ATy->getNumElements();
+    ETy = ATy->getElementType();
+    break;
+  }
+  case Type::FixedVectorTyID: {
+    auto *VTy = cast<FixedVectorType>(ETy);
+    NumArrElems = VTy->getNumElements();
+    ETy = VTy->getElementType();
+    break;
+  }
+  default:
+    break;
+  }
+
+  if (ETy->isIntegerTy(1))
+    ETy = IntegerType::get(ETy->getContext(), 8);
+
+  if (ETy->getScalarSizeInBits() == 128) {
+    if (ETy->isFloatingPointTy())
+      ETy = Type::getDoubleTy(ETy->getContext());
+    else
+      ETy = IntegerType::get(ETy->getContext(), 64);
+    NumArrElems = NumArrElems ? NumArrElems * 2 : 2;
+  }
+
+  if (!ETy->isStructTy()) {
+    GVType = getPTXFundamentalType(ETy);
+  } else {
+    NumArrElems = DL.getTypeStoreSize(ETy);
+    GVType = NVPTXDataType(8, NVPTXDataType::BasicType::Bits);
+  }
+
+  PTXStreamer->emitGlobalVariable(Linkage, AddrSpace, HasAttrManaged, Alignment,
+                                  GVType, getSymbol(GV), NumArrElems, HasInit);
+
+  return NumArrElems != 0;
 }
 
 void NVPTXAsmPrinter::emitFunctionParamList(const Function *F, raw_ostream &O) {
@@ -1487,28 +1905,166 @@ void NVPTXAsmPrinter::emitFunctionParamList(const Function *F, raw_ostream &O) {
   O << "\n)";
 }
 
+void NVPTXAsmPrinter::getFunctionParamList(
+    const Function *F, SmallVectorImpl<NVPTXFuncParam> &Params) {
+  const DataLayout &DL = getDataLayout();
+  const NVPTXSubtarget &STI = TM.getSubtarget<NVPTXSubtarget>(*F);
+  const auto *TLI = cast<NVPTXTargetLowering>(STI.getTargetLowering());
+  const NVPTXMachineFunctionInfo *MFI =
+      MF ? MF->getInfo<NVPTXMachineFunctionInfo>() : nullptr;
+  const bool IsKernelFunc = isKernelFunction(*F);
+
+  // Function has no args
+  if (F->arg_empty() && !F->isVarArg())
+    return;
+
+  // Iterate over each arg and build corresponding NVPTXFuncParam for it.
+  for (const Argument &Arg : F->args()) {
+    const std::string ParamSym = TLI->getParamName(F, Arg.getArgNo());
+    NVPTXFuncParam Param(ParamSym);
+
+    // 1. Image/sampler params
+    if (IsKernelFunc) {
+      const PTXOpaqueType ArgOpaqueType = getPTXOpaqueType(Arg);
+      if (ArgOpaqueType != PTXOpaqueType::None) {
+        if (!MFI || !MFI->checkImageHandleSymbol(ParamSym)) {
+          Param.EmitImgPtr = true;
+          Param.Type = NVPTXDataType(64, NVPTXDataType::BasicType::Unsigned);
+          Param.IsPtr = true;
+        }
+
+        Param.OpType = ArgOpaqueType;
+        Params.push_back(Param);
+        continue;
+      }
+    }
+
+    auto GetOptimalAlignForParam = [&DL, F, &Arg](Type *Ty) -> Align {
+      if (MaybeAlign StackAlign =
+              getAlign(*F, Arg.getArgNo() + AttributeList::FirstArgIndex))
+        return StackAlign.value();
+
+      Align TypeAlign = getFunctionParamOptimizedAlign(F, Ty, DL);
+      MaybeAlign ParamAlign =
+          Arg.hasByValAttr() ? Arg.getParamAlign() : MaybeAlign();
+      return std::max(TypeAlign, ParamAlign.valueOrOne());
+    };
+
+    // 2. Param has by-val attribute
+    if (Arg.hasByValAttr()) {
+      Type *ETy = Arg.getParamByValType();
+      assert(ETy && "Param should have byval type");
+
+      // Print .param .align <a> .b8 .param[size];
+      // <a>  = optimal alignment for the element type; always multiple of
+      //        PAL.getParamAlignment
+      // size = typeallocsize of element type
+      const Align OptimalAlign =
+          IsKernelFunc ? GetOptimalAlignForParam(ETy)
+                       : getFunctionByValParamAlign(
+                             F, ETy, Arg.getParamAlign().valueOrOne(), DL);
+
+      Param.Alignment = OptimalAlign.value();
+      Param.Type = NVPTXDataType(8, NVPTXDataType::BasicType::Bits);
+      Param.NumArrayElems = DL.getTypeAllocSize(ETy);
+      Params.push_back(Param);
+      continue;
+    }
+
+    // 3. Param should be passed as array
+    Type *Ty = Arg.getType();
+    if (shouldPassAsArray(Ty)) {
+      // Just print .param .align <a> .b8 .param[size];
+      // <a>  = optimal alignment for the element type; always multiple of
+      //        PAL.getParamAlignment
+      // size = typeallocsize of element type
+      Align OptimalAlign = GetOptimalAlignForParam(Ty);
+      Param.Alignment = OptimalAlign.value();
+      Param.Type = NVPTXDataType(8, NVPTXDataType::BasicType::Bits);
+      Param.NumArrayElems = DL.getTypeAllocSize(Ty);
+      Params.push_back(Param);
+      continue;
+    }
+
+    // 4. PointerTy param in kernel func
+    if (IsKernelFunc && Ty->isPointerTy()) {
+      auto *PTy = cast<PointerType>(Ty);
+      unsigned PTySize =
+          TLI->getPointerTy(DL, PTy->getAddressSpace()).getSizeInBits();
+      Align Alignment = Arg.getParamAlign().valueOrOne();
+
+      Param.Type = NVPTXDataType(PTySize, NVPTXDataType::BasicType::Unsigned);
+      Param.IsPtr = true;
+      Param.PtrAddrSpace = PTy->getAddressSpace();
+      Param.Alignment = Alignment.value();
+      Params.push_back(Param);
+      continue;
+    }
+
+    // 5. Non-pointer scalar param in kernel func
+    if (IsKernelFunc) {
+      // Special case : predicate operands become .u8 types
+      if (Ty->isIntegerTy(1))
+        Ty = IntegerType::get(Ty->getContext(), 8);
+
+      Param.Type = getPTXFundamentalType(Ty);
+      Params.push_back(Param);
+      continue;
+    }
+
+    // 6. Non-kernel function args, just print .param .b<size>
+    assert(!IsKernelFunc && "Expected non-kernel func here.");
+    unsigned TySize = 0;
+    if (auto *ITy = dyn_cast<IntegerType>(Ty))
+      TySize = ITy->getBitWidth();
+    else if (auto *PTy = dyn_cast<PointerType>(Ty))
+      TySize = TLI->getPointerTy(DL, PTy->getAddressSpace()).getSizeInBits();
+    else
+      TySize = Ty->getPrimitiveSizeInBits();
+
+    Param.Type = NVPTXDataType(TySize, NVPTXDataType::BasicType::Bits);
+    Params.push_back(Param);
+  }
+
+  // Append extra parameter for variadic args
+  if (F->isVarArg()) {
+    NVPTXFuncParam VArgParam(TLI->getParamName(F, -1 /*vararg*/));
+    VArgParam.Alignment = STI.getMaxRequiredAlignment();
+    VArgParam.Type = NVPTXDataType(8, NVPTXDataType::BasicType::Bits);
+    VArgParam.IsVarArg = true;
+    Params.push_back(VArgParam);
+  }
+}
+
 void NVPTXAsmPrinter::setAndEmitFunctionVirtualRegisters(
     const MachineFunction &MF) {
-  SmallString<128> Str;
-  raw_svector_ostream O(Str);
+  // Nothing to do if we're using NullStreamer.
+  // TODO: Bailout much earlier in NVPTXAsmPrinter if streamer is null.
+  if (OutStreamer->isNull())
+    return;
+
+  auto *PTXStreamer = static_cast<NVPTXAsmStreamer *>(OutStreamer.get());
 
   // Map the global virtual register number to a register class specific
   // virtual register number starting from 1 with that class.
   const TargetRegisterInfo *TRI = MF.getSubtarget().getRegisterInfo();
+  bool EmittedReg = false;
 
   // Emit the Fake Stack Object
   const MachineFrameInfo &MFI = MF.getFrameInfo();
   int64_t NumBytes = MFI.getStackSize();
   if (NumBytes) {
-    O << "\t.local .align " << MFI.getMaxAlign().value() << " .b8 \t"
-      << DEPOTNAME << getFunctionNumber() << "[" << NumBytes << "];\n";
-    if (static_cast<const NVPTXTargetMachine &>(MF.getTarget()).is64Bit()) {
-      O << "\t.reg .b64 \t%SP;\n"
-        << "\t.reg .b64 \t%SPL;\n";
-    } else {
-      O << "\t.reg .b32 \t%SP;\n"
-        << "\t.reg .b32 \t%SPL;\n";
-    }
+    NVPTXDataType B8Ty(8 /*BitSize*/, NVPTXDataType::BasicType::Bits);
+    std::string Name = DEPOTNAME + Twine(getFunctionNumber()).str();
+    PTXStreamer->emitLocalVariable(B8Ty, Name, MFI.getMaxAlign().value(),
+                                   NumBytes);
+    unsigned RegSize =
+        static_cast<const NVPTXTargetMachine &>(MF.getTarget()).is64Bit() ? 64
+                                                                          : 32;
+    NVPTXDataType RegTy(RegSize, NVPTXDataType::BasicType::Bits);
+    PTXStreamer->emitRegisterVariable(RegTy, "%SP");
+    PTXStreamer->emitRegisterVariable(RegTy, "%SPL");
+    EmittedReg = true;
   }
 
   // Go through all virtual registers to establish the mapping between the
@@ -1530,13 +2086,16 @@ void NVPTXAsmPrinter::setAndEmitFunctionVirtualRegisters(
 
     // Only declare those registers that may be used.
     if (N) {
-      const StringRef RCName = getNVPTXRegClassName(RC);
+      NVPTXDataType RCType = getNVPTXRegType(RC);
       const StringRef RCStr = getNVPTXRegClassStr(RC);
-      O << "\t.reg " << RCName << " \t" << RCStr << "<" << (N + 1) << ">;\n";
+      PTXStreamer->emitRegisterVariable(RCType, RCStr, N + 1);
+      EmittedReg = true;
     }
   }
 
-  OutStreamer->emitRawText(O.str());
+  // If no register was emitted, emit a newline.
+  if (!EmittedReg)
+    PTXStreamer->EmitEOL();
 }
 
 /// Translate virtual register numbers in DebugInfo locations to their printed

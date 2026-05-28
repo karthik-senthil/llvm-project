@@ -260,11 +260,13 @@ public:
 
   void emitBytes(StringRef Data) override;
 
-  void emitValueImpl(const MCExpr *Value, unsigned Size,
-                     SMLoc Loc = SMLoc()) override;
-  void emitIntValue(uint64_t Value, unsigned Size) override;
+  void emitValueImpl(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc(),
+                     bool EmitDelimit = false) override;
+  void emitIntValue(uint64_t Value, unsigned Size,
+                    bool EmitDelimit = false) override;
   void emitIntValueInHex(uint64_t Value, unsigned Size) override;
-  void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size) override;
+  void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size,
+                                    bool EmitDelimit = false) override;
 
   void emitULEB128Value(const MCExpr *Value) override;
 
@@ -1347,7 +1349,8 @@ void MCAsmStreamer::emitBinaryData(StringRef Data) {
   }
 }
 
-void MCAsmStreamer::emitIntValue(uint64_t Value, unsigned Size) {
+void MCAsmStreamer::emitIntValue(uint64_t Value, unsigned Size,
+                                 bool EmitDelimit) {
   emitValue(MCConstantExpr::create(Value, getContext()), Size);
 }
 
@@ -1355,13 +1358,13 @@ void MCAsmStreamer::emitIntValueInHex(uint64_t Value, unsigned Size) {
   emitValue(MCConstantExpr::create(Value, getContext(), true), Size);
 }
 
-void MCAsmStreamer::emitIntValueInHexWithPadding(uint64_t Value,
-                                                 unsigned Size) {
+void MCAsmStreamer::emitIntValueInHexWithPadding(uint64_t Value, unsigned Size,
+                                                 bool EmitDelimit) {
   emitValue(MCConstantExpr::create(Value, getContext(), true, Size), Size);
 }
 
-void MCAsmStreamer::emitValueImpl(const MCExpr *Value, unsigned Size,
-                                  SMLoc Loc) {
+void MCAsmStreamer::emitValueImpl(const MCExpr *Value, unsigned Size, SMLoc Loc,
+                                  bool EmitDelimit) {
   assert(Size <= 8 && "Invalid size");
   assert(getCurrentSectionOnly() &&
          "Cannot emit contents before setting section!");

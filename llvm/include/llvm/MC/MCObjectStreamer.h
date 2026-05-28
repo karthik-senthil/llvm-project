@@ -121,8 +121,8 @@ public:
   void emitAssignment(MCSymbol *Symbol, const MCExpr *Value) override;
   void emitConditionalAssignment(MCSymbol *Symbol,
                                  const MCExpr *Value) override;
-  void emitValueImpl(const MCExpr *Value, unsigned Size,
-                     SMLoc Loc = SMLoc()) override;
+  void emitValueImpl(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc(),
+                     bool EmitDelimit = false) override;
   void emitULEB128Value(const MCExpr *Value) override;
   void emitSLEB128Value(const MCExpr *Value) override;
   void emitWeakReference(MCSymbol *Alias, const MCSymbol *Target) override;

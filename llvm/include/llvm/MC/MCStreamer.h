@@ -323,6 +323,8 @@ public:
   MCContext &getContext() const { return Context; }
   bool isObj() const { return IsObj; }
 
+  virtual bool isNull() const { return false; }
+
   // MCObjectStreamer has an MCAssembler and allows more expression folding at
   // parse time.
   virtual MCAssembler *getAssemblerPtr() { return nullptr; }
@@ -736,13 +738,15 @@ public:
   /// match a native machine width.
   /// \param Loc - The location of the expression for error reporting.
   virtual void emitValueImpl(const MCExpr *Value, unsigned Size,
-                             SMLoc Loc = SMLoc());
+                             SMLoc Loc = SMLoc(), bool EmitDelimit = false);
 
-  void emitValue(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc());
+  void emitValue(const MCExpr *Value, unsigned Size, SMLoc Loc = SMLoc(),
+                 bool EmitDelimit = false);
 
   /// Special case of EmitValue that avoids the client having
   /// to pass in a MCExpr for constant integers.
-  virtual void emitIntValue(uint64_t Value, unsigned Size);
+  virtual void emitIntValue(uint64_t Value, unsigned Size,
+                            bool EmitDelimit = false);
   virtual void emitIntValue(const APInt &Value);
 
   /// Special case of EmitValue that avoids the client having to pass
@@ -760,8 +764,9 @@ public:
   /// Special case of EmitValue that avoids the client having to pass
   /// in a MCExpr for constant integers & prints in Hex format for certain
   /// modes, pads the field with leading zeros to Size width
-  virtual void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size) {
-    emitIntValue(Value, Size);
+  virtual void emitIntValueInHexWithPadding(uint64_t Value, unsigned Size,
+                                            bool EmitDelimit = false) {
+    emitIntValue(Value, Size, EmitDelimit);
   }
 
   virtual void emitULEB128Value(const MCExpr *Value);

@@ -7,6 +7,8 @@
 //===----------------------------------------------------------------------===//
 
 #include "NVPTXAsmStreamer.h"
+#include "NVPTXUtilities.h"
+#include "cl_common_defines.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Path.h"
 
@@ -106,8 +108,10 @@ void NVPTXAsmStreamer::switchSection(MCSection *Section, uint32_t Subsection) {
   MCStreamer::switchSection(Section, Subsection);
 }
 
-void NVPTXAsmStreamer::emitIntValue(uint64_t Value, unsigned Size) {
-  emitValue(MCConstantExpr::create(Value, getContext()), Size);
+void NVPTXAsmStreamer::emitIntValue(uint64_t Value, unsigned Size,
+                                    bool EmitDelimit) {
+  emitValue(MCConstantExpr::create(Value, getContext()), Size, SMLoc(),
+            EmitDelimit);
 }
 
 // Helper to check if given section corresponds to a DebugInfo section.
@@ -118,7 +122,7 @@ static bool isDebugSection(const MCSection *Sec) {
 }
 
 void NVPTXAsmStreamer::emitValueImpl(const MCExpr *Value, unsigned Size,
-                                     SMLoc Loc) {
+                                     SMLoc Loc, bool EmitDelimit) {
   assert(Size <= 8 && "Invalid size");
   MCSection *CurrSec = getCurrentSectionOnly();
   assert(CurrSec && "Cannot emit contents before setting section!");
@@ -162,13 +166,32 @@ void NVPTXAsmStreamer::emitValueImpl(const MCExpr *Value, unsigned Size,
     OS << Directive;
   }
 
-  MCTargetStreamer *TS = getTargetStreamer();
-  TS->emitValue(Value);
+  if (Value->getKind() == MCExpr::SymbolRef) {
+    const MCSymbolRefExpr &SRE = cast<MCSymbolRefExpr>(*Value);
+    StringRef SymName = SRE.getSymbol().getName();
+    if (!SymName.starts_with(".debug")) {
+      emitRawText(NVPTX::getValidPTXIdentifier(SymName));
+      return;
+    }
+    // Fall through to the normal printing.
+  }
+  // Otherwise, print the Value normally.
+  getContext().getAsmInfo()->printExpr(OS, *Value);
+  if (isDebugSection(CurrSec)) {
+    EmitEOL();
+    return;
+  }
+
+  if (EmitDelimit)
+    OS << ", ";
 }
 
 void NVPTXAsmStreamer::emitBytes(StringRef Data) {
-  MCTargetStreamer *TS = getTargetStreamer();
-  TS->emitRawBytes(Data);
+  for (auto [I, C] : llvm::enumerate(Data.bytes())) {
+    OS << (unsigned)C;
+    if (I < Data.size() - 1)
+      OS << ", ";
+  }
 }
 
 void NVPTXAsmStreamer::emitLabel(MCSymbol *Symbol, SMLoc Loc) {
@@ -441,4 +464,250 @@ void NVPTXAsmStreamer::emitDwarfLocDirectiveWithInlinedAt(
   // Emit common suffix (flags, comment, EOL, parent call).
   emitDwarfLocDirectiveSuffix(FileNo, Line, Column, Flags, Isa, Discriminator,
                               FileName, Comment);
+}
+
+void NVPTXAsmStreamer::emitPTXDataType(NVPTXDataType Ty) {
+  OS << ".";
+  switch (Ty.Type) {
+  case NVPTXDataType::BasicType::Unsigned: {
+    OS << "u";
+    break;
+  }
+  case NVPTXDataType::BasicType::Signed: {
+    OS << "s";
+    break;
+  }
+  case NVPTXDataType::BasicType::FloatingPoint: {
+    OS << "f";
+    break;
+  }
+  case NVPTXDataType::BasicType::Bits: {
+    OS << "b";
+    break;
+  }
+  case NVPTXDataType::BasicType::Predicate: {
+    OS << "pred";
+    break;
+  }
+  default:
+    llvm_unreachable("Unexpected basic type in PTXDataType.");
+  }
+
+  if (!Ty.isPred())
+    OS << Ty.BitSize;
+}
+
+void NVPTXAsmStreamer::emitLocalVariable(NVPTXDataType Ty, StringRef Name,
+                                         unsigned Alignment,
+                                         unsigned ArrElems) {
+  OS << "\t.local ";
+  emitAlignment(Alignment);
+  OS << " ";
+  emitPTXDataType(Ty);
+  OS << " \t" << Name;
+  if (ArrElems)
+    OS << "[" << ArrElems << "]";
+  OS << ";";
+
+  EmitEOL();
+}
+
+void NVPTXAsmStreamer::emitRegisterVariable(NVPTXDataType Ty, StringRef Name,
+                                            unsigned Parameter) {
+  OS << "\t.reg ";
+  emitPTXDataType(Ty);
+  OS << " \t" << Name;
+  if (Parameter)
+    OS << "<" << Parameter << ">";
+  OS << ";";
+
+  EmitEOL();
+}
+
+static void emitPTXOpaqueType(PTXOpaqueType Ty, raw_ostream &OS) {
+  switch (Ty) {
+  case PTXOpaqueType::Sampler:
+    OS << ".samplerref";
+    break;
+  case PTXOpaqueType::Texture:
+    OS << ".texref";
+    break;
+  case PTXOpaqueType::Surface:
+    OS << ".surfref";
+    break;
+  case PTXOpaqueType::None:
+    llvm_unreachable("handled above");
+  }
+}
+
+void NVPTXAsmStreamer::emitParameter(NVPTXFuncParam Param, bool PrefixTab) {
+  if (PrefixTab)
+    OS << "\t";
+  OS << ".param ";
+
+  // Speical handling for image/sampler parameters
+  if (Param.OpType != PTXOpaqueType::None) {
+    if (Param.EmitImgPtr) {
+      emitPTXDataType(Param.Type);
+      OS << " ";
+      assert(Param.IsPtr && "Image/sampler parameter expected to be ptr");
+      OS << ".ptr ";
+    }
+
+    emitPTXOpaqueType(Param.OpType, OS);
+    OS << " ";
+
+    OS << Param.Name;
+    return;
+  }
+
+  if (Param.Alignment && !Param.IsPtr) {
+    emitAlignment(Param.Alignment);
+    OS << " ";
+  }
+
+  emitPTXDataType(Param.Type);
+  OS << " ";
+
+  if (Param.IsPtr) {
+    OS << ".ptr ";
+    emitPTXAddrSpace(Param.PtrAddrSpace);
+    OS << " ";
+    emitAlignment(Param.Alignment);
+    OS << " ";
+  }
+
+  OS << Param.Name;
+  if (Param.NumArrayElems)
+    OS << "[" << Param.NumArrayElems << "]";
+}
+
+void NVPTXAsmStreamer::emitFunctionDecl(NVPTXFuncDecl PTXFunc) {
+  emitLinkage(PTXFunc.Linkage);
+  std::string FuncDir = PTXFunc.IsKernelFunc ? ".entry" : ".func";
+  OS << " " << FuncDir << " ";
+
+  if (PTXFunc.HasRetVal) {
+    OS << "(";
+    emitParameter(PTXFunc.RetVal);
+    OS << ") ";
+  }
+
+  PTXFunc.Sym->print(OS, MAI);
+  OS << "\n";
+
+  if (PTXFunc.Params.empty()) {
+    OS << "()";
+  } else {
+    OS << "(\n";
+    for (auto [I, Param] : llvm::enumerate(PTXFunc.Params)) {
+      if (I != 0)
+        OS << ",\n";
+
+      emitParameter(Param, true /*PrefixTab*/);
+    }
+    OS << "\n)";
+  }
+  OS << "\n";
+
+  if (PTXFunc.EmitNoReturn)
+    OS << ".noreturn";
+
+  OS << ";\n";
+}
+
+void NVPTXAsmStreamer::emitOpaqueTyGlobal(NVPTXLinkage Linkage,
+                                          PTXOpaqueType OpaqueType,
+                                          StringRef Name,
+                                          bool NeedInitForSampler,
+                                          unsigned Sample) {
+  emitLinkage(Linkage);
+  OS << " ";
+  // Opaque type GVs are always in global addrspace
+  OS << ".global ";
+  emitPTXOpaqueType(OpaqueType, OS);
+  OS << " ";
+  OS << Name;
+
+  if (NeedInitForSampler) {
+    OS << " = { ";
+
+    for (int I = 0,
+             Addr = ((Sample & __CLK_ADDRESS_MASK) >> __CLK_ADDRESS_BASE);
+         I < 3; I++) {
+      OS << "addr_mode_" << I << " = ";
+      switch (Addr) {
+      case 0:
+        OS << "wrap";
+        break;
+      case 1:
+        OS << "clamp_to_border";
+        break;
+      case 2:
+        OS << "clamp_to_edge";
+        break;
+      case 3:
+        OS << "wrap";
+        break;
+      case 4:
+        OS << "mirror";
+        break;
+      }
+      OS << ", ";
+    }
+    OS << "filter_mode = ";
+    switch ((Sample & __CLK_FILTER_MASK) >> __CLK_FILTER_BASE) {
+    case 0:
+      OS << "nearest";
+      break;
+    case 1:
+      OS << "linear";
+      break;
+    case 2:
+      llvm_unreachable("Anisotropic filtering is not supported");
+    default:
+      OS << "nearest";
+      break;
+    }
+    if (!((Sample & __CLK_NORMALIZED_MASK) >> __CLK_NORMALIZED_BASE)) {
+      OS << ", force_unnormalized_coords = 1";
+    }
+    OS << " }";
+  }
+
+  OS << ";\n";
+}
+
+void NVPTXAsmStreamer::emitGlobalVariable(NVPTXLinkage Linkage,
+                                          unsigned AddrSpace,
+                                          bool HasAttrManaged,
+                                          unsigned Alignment, NVPTXDataType Ty,
+                                          MCSymbol *Sym, uint64_t NumArrElems,
+                                          bool HasInit) {
+  emitLinkage(Linkage);
+  OS << " ";
+  emitPTXAddrSpace(AddrSpace);
+  OS << " ";
+  if (HasAttrManaged)
+    OS << ".attribute(.managed) ";
+
+  emitAlignment(Alignment);
+  OS << " ";
+
+  emitPTXDataType(Ty);
+  OS << " ";
+
+  Sym->print(OS, MAI);
+
+  if (NumArrElems)
+    OS << "[" << NumArrElems << "]";
+
+  if (!HasInit) {
+    OS << ";\n";
+    return;
+  }
+
+  OS << " = ";
+  if (NumArrElems)
+    OS << "{";
 }
